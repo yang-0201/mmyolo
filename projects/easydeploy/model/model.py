@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from copy import deepcopy
 from functools import partial
 from typing import List, Optional, Tuple
 
@@ -11,6 +12,7 @@ from torch import Tensor
 from mmyolo.models import RepVGGBlock
 from mmyolo.models.dense_heads import (PPYOLOEHead, RTMDetHead, YOLOv5Head,
                                        YOLOv7Head, YOLOv8Head, YOLOXHead)
+from mmyolo.models.layers import ImplicitA, ImplicitM
 from ..backbone import DeployFocus, GConvFocus, NcnnFocus
 from ..bbox_code import (rtmdet_bbox_decoder, yolov5_bbox_decoder,
                          yolox_bbox_decoder)
@@ -177,5 +179,18 @@ class DeployModel(nn.Module):
 
     @staticmethod
     def forward_single(x: Tensor, convs: nn.Module) -> Tuple[Tensor]:
+        if any(type(m) in (ImplicitA, ImplicitM) for m in convs):
+            a, c, m = convs
+            aw = a.implicit.clone()
+            mw = m.implicit.clone()
+            c = deepcopy(c)
+            nw, cw, _, _ = c.weight.shape
+            na, ca, _, _ = aw.shape
+            nm, cm, _, _ = mw.shape
+            c.bias = nn.Parameter(c.bias + (
+                c.weight.reshape(nw, cw) @ aw.reshape(ca, na)).squeeze(1))
+            c.bias = nn.Parameter(c.bias * mw.reshape(cm))
+            c.weight = nn.Parameter(c.weight * mw.transpose(0, 1))
+            convs = c
         feat = convs(x)
         return (feat, )
