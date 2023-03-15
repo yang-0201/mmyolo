@@ -6,6 +6,7 @@ from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
 from mmdet.models.backbones.csp_darknet import Focus
+from mmdet.models.layers import ChannelAttention
 from mmengine.config import ConfigDict
 from torch import Tensor
 
@@ -64,6 +65,8 @@ class DeployModel(nn.Module):
         for layer in self.baseModel.modules():
             if isinstance(layer, RepVGGBlock):
                 layer.switch_to_deploy()
+            elif isinstance(layer, ChannelAttention):
+                layer.global_avgpool.forward = self.forward_gvp
             elif isinstance(layer, Focus):
                 # onnxruntime openvino tensorrt8 tensorrt7
                 if self.backend in (MMYOLOBackend.ONNXRUNTIME,
@@ -174,12 +177,14 @@ class DeployModel(nn.Module):
                     else:
                         outputs.append(torch.cat(feats, 1).permute(0, 2, 3, 1))
             else:
-                outputs = [torch.cat(feats, 1) for feats in zip(*neck_outputs)]
+                for feats in zip(*neck_outputs):
+                    outputs.extend(feats)
             return tuple(outputs)
 
     @staticmethod
     def forward_single(x: Tensor, convs: nn.Module) -> Tuple[Tensor]:
-        if any(type(m) in (ImplicitA, ImplicitM) for m in convs):
+        if isinstance(convs, nn.Sequential) and any(
+                type(m) in (ImplicitA, ImplicitM) for m in convs):
             a, c, m = convs
             aw = a.implicit.clone()
             mw = m.implicit.clone()
@@ -194,3 +199,7 @@ class DeployModel(nn.Module):
             convs = c
         feat = convs(x)
         return (feat, )
+
+    @staticmethod
+    def forward_gvp(x: Tensor) -> Tensor:
+        return torch.mean(x, [2, 3], keepdim=True)
