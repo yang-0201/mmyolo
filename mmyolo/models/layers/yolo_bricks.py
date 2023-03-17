@@ -1073,8 +1073,7 @@ class ImplicitA(nn.Module):
         Args:
             x (Tensor): The input tensor.
         """
-        # return self.implicit + x
-        return self.implicit.expand_as(x) + x
+        return self.implicit + x
 
 
 class ImplicitM(nn.Module):
@@ -1096,8 +1095,7 @@ class ImplicitM(nn.Module):
         Args:
             x (Tensor): The input tensor.
         """
-        # return self.implicit * x
-        return self.implicit.expand_as(x) * x
+        return self.implicit * x
 
 
 @MODELS.register_module()
