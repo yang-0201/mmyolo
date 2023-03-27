@@ -17,6 +17,11 @@ from ..bbox_code import (rtmdet_bbox_decoder, yolov5_bbox_decoder,
                          yolox_bbox_decoder)
 from ..nms import batched_nms, efficient_nms, onnx_nms
 
+try:
+    from mmcls.models.backbones import RepVGG
+except ImportError:
+    RepVGG = None
+
 
 class DeployModel(nn.Module):
 
@@ -48,7 +53,7 @@ class DeployModel(nn.Module):
 
     def __switch_deploy(self):
         for layer in self.baseModel.modules():
-            if isinstance(layer, RepVGGBlock):
+            if isinstance(layer, (RepVGGBlock, RepVGG)):
                 layer.switch_to_deploy()
             elif isinstance(layer, Focus):
                 # onnxruntime tensorrt8 tensorrt7
