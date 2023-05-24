@@ -19,14 +19,16 @@ val_batch_size_per_gpu = 1
 base_lr = 0.004
 max_epochs = 300  # Maximum training epochs
 
-img_scale = (1600, 1600)  # width, height
+img_scale = (1280, 1280)  # width, height
+
+strides = [8, 16, 32, 64]
 
 # Config of batch shapes. Only on val.
 batch_shapes_cfg = dict(
     type='BatchShapePolicy',
     batch_size=val_batch_size_per_gpu,
     img_size=img_scale[0],
-    size_divisor=32,
+    size_divisor=64,
     extra_pad_ratio=0.5)
 
 # Save model checkpoint and validation intervals
@@ -40,10 +42,21 @@ max_keep_ckpts = 5
 
 # =======================Unmodified in most cases==================
 model = dict(
-    backbone=dict(deepen_factor=deepen_factor, widen_factor=widen_factor),
-    neck=dict(deepen_factor=deepen_factor, widen_factor=widen_factor),
+    backbone=dict(
+        arch='P6',
+        deepen_factor=deepen_factor,
+        widen_factor=widen_factor,
+        out_indices=(2, 3, 4, 5)),
+    neck=dict(
+        deepen_factor=deepen_factor,
+        widen_factor=widen_factor,
+        in_channels=[256, 512, 768, 1024]),
     bbox_head=dict(
-        head_module=dict(num_classes=num_classes, widen_factor=widen_factor)),
+        head_module=dict(
+            num_classes=num_classes,
+            widen_factor=widen_factor,
+            featmap_strides=strides),
+        prior_generator=dict(strides=strides)),
     train_cfg=dict(assigner=dict(dict(num_classes=num_classes))))
 
 train_pipeline = [
