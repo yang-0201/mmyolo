@@ -2,19 +2,21 @@
 import collections
 import copy
 from abc import ABCMeta, abstractmethod
+from operator import itemgetter
 from typing import Optional, Sequence, Tuple, Union
 
+import cv2
 import mmcv
 import numpy as np
+import torch
 from mmcv.transforms import BaseTransform
 from mmdet.structures.bbox import autocast_box_type
 from mmengine.dataset import BaseDataset
 from mmengine.dataset.base_dataset import Compose
 from numpy import random
+from PIL import Image  # noqa F401
 
 from mmyolo.registry import TRANSFORMS
-
-
 
 
 class BaseMixImageTransform(BaseTransform, metaclass=ABCMeta):
@@ -59,7 +61,6 @@ class BaseMixImageTransform(BaseTransform, metaclass=ABCMeta):
         self.max_cached_images = max_cached_images
         self.random_pop = random_pop
         self.results_cache = []
-
 
         if pre_transform is None:
             self.pre_transform = None
@@ -264,19 +265,20 @@ class Mosaic(BaseMixImageTransform):
             iteration is terminated and raise the error. Defaults to 15.
     """
 
-    def __init__(self,
-                 img_scale: Tuple[int, int] = (640, 640),
-                 center_ratio_range: Tuple[float, float] = (0.5, 1.5),
-                 bbox_clip_border: bool = True,
-                 pad_val: float = 114.0,
-                 pre_transform: Sequence[dict] = None,
-                 prob: float = 1.0,
-                 use_cached: bool = False,
-                 max_cached_images: int = 40,
-                 random_pop: bool = True,
-                 max_refetch: int = 15,
-                 use_random_cache_mixup_single: bool = True,
-                 ):
+    def __init__(
+        self,
+        img_scale: Tuple[int, int] = (640, 640),
+        center_ratio_range: Tuple[float, float] = (0.5, 1.5),
+        bbox_clip_border: bool = True,
+        pad_val: float = 114.0,
+        pre_transform: Sequence[dict] = None,
+        prob: float = 1.0,
+        use_cached: bool = False,
+        max_cached_images: int = 40,
+        random_pop: bool = True,
+        max_refetch: int = 15,
+        use_random_cache_mixup_single: bool = True,
+    ):
         assert isinstance(img_scale, tuple)
         assert 0 <= prob <= 1.0, 'The probability should be in range [0,1]. ' \
                                  f'got {prob}.'
@@ -312,32 +314,37 @@ class Mosaic(BaseMixImageTransform):
         indexes = [random.randint(0, len(dataset)) for _ in range(3)]
         return indexes
 
-    def random_cache_mixup_single_mmyolo(self,img_size1, img4, labels4, class4, mosaic_ignore_flags, mixup_number=6,
-                                         change_rotate=True, change_size=True,
-                                         new_scale=0.3, max_cached_images=100):
-        import random
-        import cv2
-        import torch
+    def random_cache_mixup_single_mmyolo(self,
+                                         img4,
+                                         labels4,
+                                         class4,
+                                         mosaic_ignore_flags,
+                                         mixup_number=6,
+                                         change_rotate=True,
+                                         change_size=True,
+                                         new_scale=0.3,
+                                         max_cached_images=100):
+        before_h, before_w = img4.shape[:2]
 
-        for label, label1 in zip(labels4, class4):
-            left = int(label.tensor.numpy()[0][0])
-            lower = int(label.tensor.numpy()[0][1])
-            right = int(label.tensor.numpy()[0][2])
-            upper = int(label.tensor.numpy()[0][3])
+        for label, label1 in zip(labels4.tensor.round().int(), class4):
+            left, lower, right, upper = label.tolist()
             class_name = label1
             if left == right or upper == lower:
                 continue
-            cropped = img4[lower:upper, left:right]  # (left, upper, right, lower)
+            cropped = img4[lower:upper,
+                           left:right]  # (left, upper, right, lower)
             self.cropp_img.append(copy.deepcopy(cropped))
             self.cropp_img_class.append(copy.deepcopy(class_name))
+        _mem_len = len(self.cropp_img)
         # 判断标签丰富度
-        if len(labels4.tensor.numpy()) <= 20:
+        if labels4.shape[0] <= 20:
             mixup_number = 2 * mixup_number
         for i in range(mixup_number):
-            index = random.choices(range(0, len(self.cropp_img)), k=1)[0]
+            index = random.choice(range(0, len(self.cropp_img)))
+
             im = self.cropp_img[index].copy()
             class_name = self.cropp_img_class[index].copy()
-            if len(im):
+            if im.size:
                 if change_rotate:
                     # 随机旋转
                     if random.random() < 0.15:
@@ -359,33 +366,31 @@ class Mosaic(BaseMixImageTransform):
                     if H == 0 or W == 0:
                         continue
                     im = cv2.resize(im, (W, H))
-                    # im = cv2.resize(im, None,fx=scale,fy=scale)
-                point = [random.randint(100, img_size1[0] - W - 100), random.randint(100, img_size1[1] - H - 100)]
+
+                _paste_x0 = random.randint(100, before_w - W - 100)
+                _paste_y0 = random.randint(100, before_h - H - 100)
+                _before_img4 = img4[_paste_y0:_paste_y0 + H,
+                                    _paste_x0:_paste_x0 + W]
                 r = np.random.beta(32.0, 32.0)  # mixup ratio, alpha=beta=32.0
-                im = (im * r + img4[point[1]:point[1] + H, point[0]:point[0] + W] * (1 - r)).astype(np.uint8)
+                im = cv2.addWeighted(im, r, _before_img4, 1 - r, 0)
 
-                # img5 = img4.copy()
-                img4[point[1]:point[1] + H, point[0]:point[0] + W] = im
-                # img5 = Image.fromarray(img5)
-                # img5.show()
-                # labels_single_img = " ".join([np.float32(class_name),np.float32(point[0]),np.float32(point[0] + W),np.float32(point[1]),np.float32(point[1]+H)])
-                labels_single_img = np.array([[point[0], point[1], point[0] + W, point[1] + H]],
-                                             dtype=np.float32)
-                # labels4_numpy = np.concatenate((labels_single_img, labels4.tensor.numpy()), 0)
-                labels4.tensor = torch.cat((labels4.tensor, torch.tensor(labels_single_img)), 0)
+                img4[_paste_y0:_paste_y0 + H, _paste_x0:_paste_x0 + W] = im
+
+                labels_single_img = torch.tensor(
+                    [[_paste_x0, _paste_y0, _paste_x0 + W, _paste_y0 + H]],
+                    dtype=torch.float32)
+                labels4.tensor = torch.cat((labels4.tensor, labels_single_img),
+                                           0)
                 class4 = np.append(class4, class_name)
-                mosaic_ignore_flags = np.append(mosaic_ignore_flags, "False")
-                # class4 = np.concatenate((class4[], np.array(class_name,dtype=np.float32)), 0)
-                # picture(img4, labels4, "exp")
+                mosaic_ignore_flags = np.append(mosaic_ignore_flags, False)
 
-        if len(self.cropp_img) >= max_cached_images:
-            index1 = random.choices(range(0, len(self.cropp_img)), k=max_cached_images // 2)
-            counter = 0
-            for index_del in index1:
-                index_del = index_del - counter
-                self.cropp_img.pop(index_del)
-                self.cropp_img_class.pop(index_del)
-                counter += 1
+        if _mem_len >= max_cached_images:
+            _index = random.choice(
+                range(0, len(self.cropp_img)),
+                size=_mem_len - max_cached_images // 2)
+            _iter = itemgetter(*_index)
+            self.cropp_img = _iter(self.cropp_img)
+            self.cropp_img_class = _iter(self.cropp_img_class)
         return img4, labels4, class4, mosaic_ignore_flags
 
     def mix_img_transform(self, results: dict) -> dict:
@@ -491,38 +496,21 @@ class Mosaic(BaseMixImageTransform):
                 mosaic_masks = mosaic_masks[0].cat(mosaic_masks)[inside_inds]
                 results['gt_masks'] = mosaic_masks
         if self.use_random_cache_mixup_single:
-            mosaic_img,mosaic_bboxes,mosaic_bboxes_labels,mosaic_ignore_flags = self.random_cache_mixup_single_mmyolo(mosaic_img.shape,mosaic_img,mosaic_bboxes,mosaic_bboxes_labels,mosaic_ignore_flags)
+            _ = self.random_cache_mixup_single_mmyolo(mosaic_img,
+                                                      mosaic_bboxes,
+                                                      mosaic_bboxes_labels,
+                                                      mosaic_ignore_flags)
+
+            mosaic_img, mosaic_bboxes, mosaic_bboxes_labels, \
+                mosaic_ignore_flags = _
 
         results['img'] = mosaic_img
-        # from PIL import Image
-        # img5 = Image.fromarray(mosaic_img)
-        #
-        # img5.show()
         results['img_shape'] = mosaic_img.shape
         results['gt_bboxes'] = mosaic_bboxes
         results['gt_bboxes_labels'] = mosaic_bboxes_labels
-        # for label,label1 in zip(results['gt_bboxes'],results['gt_bboxes_labels']):
-        #     x_min = int(label.tensor.numpy()[0][0])
-        #     y_min = int(label.tensor.numpy()[0][1])
-        #     x_max = int(label.tensor.numpy()[0][2])
-        #     y_max = int(label.tensor.numpy()[0][3])
-        #     name = int(label1)
-        #
-        #     cv2.rectangle(mosaic_img, (x_min, y_min), (x_max, y_max), (0, 0, 0), 2)
-        #     cv2.putText(mosaic_img, str(name), (x_min, y_min), 1, 1, (0, 0, 0))
-        #
-        # cv2.namedWindow("Demo", cv2.WINDOW_NORMAL)
-        # cv2.resizeWindow("Demo", 1280, 1280)
-        # cv2.imshow("Demo", mosaic_img)
-        # cv2.waitKey(0)  # 等待用户按键触发
-        # cv2.imwrite(1 + ".png", mosaic_img)
         results['gt_ignore_flags'] = mosaic_ignore_flags
 
-
         return results
-
-
-
 
     def _mosaic_combine(
             self, loc: str, center_position_xy: Sequence[float],
