@@ -227,6 +227,7 @@ _test_dataloader = dict(
     dataset=dict(
         type=_base_.dataset_type,
         data_root=_base_.data_root,
+        metainfo=metainfo,
         ann_file=test_image_info,
         data_prefix=dict(img=test_image),
         test_mode=True,
