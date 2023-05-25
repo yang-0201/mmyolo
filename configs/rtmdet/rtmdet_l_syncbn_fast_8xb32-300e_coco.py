@@ -12,11 +12,11 @@ val_data_prefix = 'val2017/'  # Prefix of val image path
 
 num_classes = 80  # Number of classes for classification
 # Batch size of a single GPU during training
-train_batch_size_per_gpu = 32
+train_batch_size_per_gpu = 2
 # Worker to pre-fetch data for each single GPU during training
-train_num_workers = 10
+train_num_workers = 0
 # persistent_workers must be False if num_workers is 0.
-persistent_workers = True
+persistent_workers = False
 
 # -----train val related-----
 # Base learning rate for optim_wrapper. Corresponding to 8xb16=64 bs
@@ -46,9 +46,9 @@ mixup_max_cached_images = 20
 # Dataset type, this will be used to define the dataset
 dataset_type = 'YOLOv5CocoDataset'
 # Batch size of a single GPU during validation
-val_batch_size_per_gpu = 32
+val_batch_size_per_gpu = 1
 # Worker to pre-fetch data for each single GPU during validation
-val_num_workers = 10
+val_num_workers = 0
 
 # Config of batch shapes. Only on val.
 batch_shapes_cfg = dict(
