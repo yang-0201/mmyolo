@@ -14,6 +14,8 @@ from numpy import random
 
 from mmyolo.registry import TRANSFORMS
 
+import torch
+classesname =  ['battery', 'pressure', 'umbrella', 'OCbottle', 'glassbottle', 'lighter', 'electronicequipment', 'knife', 'metalbottle' ]
 
 class BaseMixImageTransform(BaseTransform, metaclass=ABCMeta):
     """A Base Transform of multiple images mixed.
@@ -57,6 +59,7 @@ class BaseMixImageTransform(BaseTransform, metaclass=ABCMeta):
         self.max_cached_images = max_cached_images
         self.random_pop = random_pop
         self.results_cache = []
+
 
         if pre_transform is None:
             self.pre_transform = None
@@ -271,7 +274,9 @@ class Mosaic(BaseMixImageTransform):
                  use_cached: bool = False,
                  max_cached_images: int = 40,
                  random_pop: bool = True,
-                 max_refetch: int = 15):
+                 max_refetch: int = 15,
+                 use_random_cache_mixup_single: bool = True,
+                 ):
         assert isinstance(img_scale, tuple)
         assert 0 <= prob <= 1.0, 'The probability should be in range [0,1]. ' \
                                  f'got {prob}.'
@@ -291,6 +296,9 @@ class Mosaic(BaseMixImageTransform):
         self.center_ratio_range = center_ratio_range
         self.bbox_clip_border = bbox_clip_border
         self.pad_val = pad_val
+        self.cropp_img = []
+        self.cropp_img_class = []
+        self.use_random_cache_mixup_single = use_random_cache_mixup_single
 
     def get_indexes(self, dataset: Union[BaseDataset, list]) -> list:
         """Call function to collect indexes.
@@ -303,6 +311,77 @@ class Mosaic(BaseMixImageTransform):
         """
         indexes = [random.randint(0, len(dataset)) for _ in range(3)]
         return indexes
+
+    def random_cache_mixup_single_mmyolo(self,img_size1, img4, labels4, class4, mosaic_ignore_flags, mixup_number=8,
+                                         change_rotate=True, change_size=True,
+                                         new_scale=0.3, max_cached_images=100):
+        import random
+        import cv2
+
+
+
+        for label, label1 in zip(labels4, class4):
+            left = int(label.tensor.numpy()[0][0])
+            lower = int(label.tensor.numpy()[0][1])
+            right = int(label.tensor.numpy()[0][2])
+            upper = int(label.tensor.numpy()[0][3])
+            class_name = label1
+            if left == right or upper == lower:
+                continue
+            cropped = img4[lower:upper, left:right]  # (left, upper, right, lower)
+            self.cropp_img.append(cropped)
+            self.cropp_img_class.append(class_name)
+        # 判断标签丰富度
+        if len(labels4.tensor.numpy()) <= 20:
+            mixup_number = 2 * mixup_number
+        for i in range(mixup_number):
+            index = random.choices(range(0, len(self.cropp_img)), k=1)[0]
+            im = self.cropp_img[index].copy()
+            class_name = self.cropp_img_class[index].copy()
+            if len(im):
+                if change_rotate:
+                    # 随机旋转
+                    if random.random() < 0.75:
+                        im = np.rot90(im, [1,-1,2][random.randint(0,2)])
+                    else:
+                        pass
+                W = im.shape[1]
+                H = im.shape[0]
+                if change_size:
+                    scale = random.uniform(1 - new_scale, 1 + new_scale)
+                    W = int(W * scale)
+                    H = int(H * scale)
+                    if H == 0 or W == 0:
+                        continue
+                    im = cv2.resize(im, (W, H))
+                    # im = cv2.resize(im, None,fx=scale,fy=scale)
+                point = [random.randint(100, img_size1[0] - W - 100), random.randint(100, img_size1[1] - H - 100)]
+                r = np.random.beta(32.0, 32.0)  # mixup ratio, alpha=beta=32.0
+                im = (im * r + img4[point[1]:point[1] + H, point[0]:point[0] + W] * (1 - r)).astype(np.uint8)
+
+                # img5 = img4.copy()
+                img4[point[1]:point[1] + H, point[0]:point[0] + W] = im
+                # img5 = Image.fromarray(img5)
+                # img5.show()
+                # labels_single_img = " ".join([np.float32(class_name),np.float32(point[0]),np.float32(point[0] + W),np.float32(point[1]),np.float32(point[1]+H)])
+                labels_single_img = np.array([[point[0], point[1], point[0] + W, point[1] + H]],
+                                             dtype=np.float32)
+                # labels4_numpy = np.concatenate((labels_single_img, labels4.tensor.numpy()), 0)
+                labels4.tensor = torch.cat((labels4.tensor, torch.tensor(labels_single_img).contiguous()), 0)
+                class4 = np.append(class4, class_name)
+                mosaic_ignore_flags = np.append(mosaic_ignore_flags, 0)
+                # class4 = np.concatenate((class4[], np.array(class_name,dtype=np.float32)), 0)
+                # picture(img4, labels4, "exp")
+
+        if len(self.cropp_img) >= max_cached_images:
+            index1 = random.choices(range(0, len(self.cropp_img)), k=max_cached_images // 2)
+            counter = 0
+            for index_del in index1:
+                index_del = index_del - counter
+                self.cropp_img.pop(index_del)
+                self.cropp_img_class.pop(index_del)
+                counter += 1
+        return img4, labels4, class4, mosaic_ignore_flags
 
     def mix_img_transform(self, results: dict) -> dict:
         """Mixed image data transformation.
@@ -318,9 +397,7 @@ class Mosaic(BaseMixImageTransform):
         mosaic_bboxes_labels = []
         mosaic_ignore_flags = []
         mosaic_masks = []
-        mosaic_kps = []
         with_mask = True if 'gt_masks' in results else False
-        with_kps = True if 'gt_keypoints' in results else False
         # self.img_scale is wh format
         img_scale_w, img_scale_h = self.img_scale
 
@@ -388,12 +465,6 @@ class Mosaic(BaseMixImageTransform):
                     offset=padh,
                     direction='vertical')
                 mosaic_masks.append(gt_masks_i)
-            if with_kps and results_patch.get('gt_keypoints',
-                                              None) is not None:
-                gt_kps_i = results_patch['gt_keypoints']
-                gt_kps_i.rescale_([scale_ratio_i, scale_ratio_i])
-                gt_kps_i.translate_([padw, padh])
-                mosaic_kps.append(gt_kps_i)
 
         mosaic_bboxes = mosaic_bboxes[0].cat(mosaic_bboxes, 0)
         mosaic_bboxes_labels = np.concatenate(mosaic_bboxes_labels, 0)
@@ -404,10 +475,6 @@ class Mosaic(BaseMixImageTransform):
             if with_mask:
                 mosaic_masks = mosaic_masks[0].cat(mosaic_masks)
                 results['gt_masks'] = mosaic_masks
-            if with_kps:
-                mosaic_kps = mosaic_kps[0].cat(mosaic_kps, 0)
-                mosaic_kps.clip_([2 * img_scale_h, 2 * img_scale_w])
-                results['gt_keypoints'] = mosaic_kps
         else:
             # remove outside bboxes
             inside_inds = mosaic_bboxes.is_inside(
@@ -418,18 +485,41 @@ class Mosaic(BaseMixImageTransform):
             if with_mask:
                 mosaic_masks = mosaic_masks[0].cat(mosaic_masks)[inside_inds]
                 results['gt_masks'] = mosaic_masks
-            if with_kps:
-                mosaic_kps = mosaic_kps[0].cat(mosaic_kps, 0)
-                mosaic_kps = mosaic_kps[inside_inds]
-                results['gt_keypoints'] = mosaic_kps
+        if self.use_random_cache_mixup_single:
+            mosaic_img,mosaic_bboxes,mosaic_bboxes_labels,mosaic_ignore_flags = self.random_cache_mixup_single_mmyolo(mosaic_img.shape,mosaic_img,mosaic_bboxes,mosaic_bboxes_labels,mosaic_ignore_flags)
 
         results['img'] = mosaic_img
+        # from PIL import Image
+        # img5 = Image.fromarray(mosaic_img)
+        #
+        # img5.show()
         results['img_shape'] = mosaic_img.shape
         results['gt_bboxes'] = mosaic_bboxes
         results['gt_bboxes_labels'] = mosaic_bboxes_labels
         results['gt_ignore_flags'] = mosaic_ignore_flags
+        # import cv2
+        # for label,label1 in zip(results['gt_bboxes'],results['gt_bboxes_labels']):
+        #     x_min = int(label.tensor.numpy()[0][0])
+        #     y_min = int(label.tensor.numpy()[0][1])
+        #     x_max = int(label.tensor.numpy()[0][2])
+        #     y_max = int(label.tensor.numpy()[0][3])
+        #     name = int(label1)
+        #
+        #     cv2.rectangle(mosaic_img, (x_min, y_min), (x_max, y_max), (0, 0, 0), 2)
+        #     cv2.putText(mosaic_img, str(classesname[name]), (x_min, y_min), cv2.FONT_HERSHEY_SIMPLEX , 1, (0, 0, 0),2)
+        #
+        # cv2.namedWindow("Demo", cv2.WINDOW_NORMAL)
+        # cv2.resizeWindow("Demo", 1280, 1280)
+        # cv2.imshow("Demo", mosaic_img)
+        # cv2.waitKey(0)  # 等待用户按键触发
+        # cv2.imwrite(1 + ".png", mosaic_img)
+
+
 
         return results
+
+
+
 
     def _mosaic_combine(
             self, loc: str, center_position_xy: Sequence[float],
@@ -1146,31 +1236,6 @@ class YOLOXMixUp(BaseMixImageTransform):
             mixup_gt_bboxes = mixup_gt_bboxes[inside_inds]
             mixup_gt_bboxes_labels = mixup_gt_bboxes_labels[inside_inds]
             mixup_gt_ignore_flags = mixup_gt_ignore_flags[inside_inds]
-
-        if 'gt_keypoints' in results:
-            # adjust kps
-            retrieve_gt_keypoints = retrieve_results['gt_keypoints']
-            retrieve_gt_keypoints.rescale_([scale_ratio, scale_ratio])
-            if self.bbox_clip_border:
-                retrieve_gt_keypoints.clip_([origin_h, origin_w])
-
-            if is_filp:
-                retrieve_gt_keypoints.flip_([origin_h, origin_w],
-                                            direction='horizontal')
-
-            # filter
-            cp_retrieve_gt_keypoints = retrieve_gt_keypoints.clone()
-            cp_retrieve_gt_keypoints.translate_([-x_offset, -y_offset])
-            if self.bbox_clip_border:
-                cp_retrieve_gt_keypoints.clip_([target_h, target_w])
-
-            # mixup
-            mixup_gt_keypoints = cp_retrieve_gt_keypoints.cat(
-                (results['gt_keypoints'], cp_retrieve_gt_keypoints), dim=0)
-            if not self.bbox_clip_border:
-                # remove outside bbox
-                mixup_gt_keypoints = mixup_gt_keypoints[inside_inds]
-            results['gt_keypoints'] = mixup_gt_keypoints
 
         results['img'] = mixup_img.astype(np.uint8)
         results['img_shape'] = mixup_img.shape
