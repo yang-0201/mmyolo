@@ -342,7 +342,7 @@ class Mosaic(BaseMixImageTransform):
                 if change_rotate:
                     # 随机旋转
                     if random.random() < 0.75:
-                        im = np.rot90(im, [1,-1,2][random.randint(0,4)])
+                        im = np.rot90(im, [1,-1,2][random.randint(0,2)])
                     else:
                         pass
                 W = im.shape[1]
