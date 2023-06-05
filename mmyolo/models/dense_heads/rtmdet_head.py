@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -206,23 +206,26 @@ class RTMDetHead(YOLOv5Head):
             Defaults to None.
     """
 
-    def __init__(self,
-                 head_module: ConfigType,
-                 prior_generator: ConfigType = dict(
-                     type='mmdet.MlvlPointGenerator',
-                     offset=0,
-                     strides=[8, 16, 32]),
-                 bbox_coder: ConfigType = dict(type='DistancePointBBoxCoder'),
-                 loss_cls: ConfigType = dict(
-                     type='mmdet.QualityFocalLoss',
-                     use_sigmoid=True,
-                     beta=2.0,
-                     loss_weight=1.0),
-                 loss_bbox: ConfigType = dict(
-                     type='mmdet.GIoULoss', loss_weight=2.0),
-                 train_cfg: OptConfigType = None,
-                 test_cfg: OptConfigType = None,
-                 init_cfg: OptMultiConfig = None):
+    def __init__(
+            self,
+            head_module: ConfigType,
+            prior_generator: ConfigType = dict(
+                type='mmdet.MlvlPointGenerator', offset=0, strides=[8, 16,
+                                                                    32]),
+            bbox_coder: ConfigType = dict(type='DistancePointBBoxCoder'),
+            loss_cls: ConfigType = dict(
+                type='mmdet.QualityFocalLoss',
+                use_sigmoid=True,
+                beta=2.0,
+                loss_weight=1.0),
+            loss_bbox: ConfigType = dict(
+                type='mmdet.GIoULoss', loss_weight=2.0),
+            train_cfg: OptConfigType = None,
+            test_cfg: OptConfigType = None,
+            init_cfg: OptMultiConfig = None,
+            cls_weight: Optional[
+                List] = None,  # # Modify by triplemu 2023.06.05
+    ):
 
         super().__init__(
             head_module=head_module,
@@ -241,6 +244,14 @@ class RTMDetHead(YOLOv5Head):
             self.cls_out_channels = self.num_classes + 1
         # rtmdet doesn't need loss_obj
         self.loss_obj = None
+        # Modify by triplemu 2023.06.05
+        if cls_weight is None:
+            self.cls_weight = cls_weight
+        elif isinstance(cls_weight, list):
+            assert head_module['num_classes'] == len(cls_weight) - 1
+            self.register_buffer('cls_weight', torch.tensor(cls_weight))
+        else:
+            raise NotImplementedError
 
     def special_init(self):
         """Since YOLO series algorithms will inherit from YOLOv5Head, but
@@ -339,7 +350,14 @@ class RTMDetHead(YOLOv5Head):
                                         gt_bboxes, pad_bbox_flag)
 
         labels = assigned_result['assigned_labels'].reshape(-1)
-        label_weights = assigned_result['assigned_labels_weights'].reshape(-1)
+        # Modify by triplemu 2023.06.05
+        if self.cls_weight is None:
+            label_weights = assigned_result['assigned_labels_weights'].reshape(
+                -1)
+        elif isinstance(self.cls_weight, torch.Tensor):
+            label_weights = torch.index_select(self.cls_weight, -1, labels)
+        else:
+            raise NotImplementedError
         bbox_targets = assigned_result['assigned_bboxes'].reshape(-1, 4)
         assign_metrics = assigned_result['assign_metrics'].reshape(-1)
         cls_preds = flatten_cls_scores.reshape(-1, self.num_classes)
