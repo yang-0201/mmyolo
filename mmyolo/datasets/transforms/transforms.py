@@ -1554,6 +1554,70 @@ class RandomCropIJCAI(PPYOLOERandomCrop):
     def _get_crop_size(self, image_size: Tuple[int, int]) -> Tuple[int, int]:
         return self.crop_size, self.crop_size
 
+    @autocast_box_type()
+    def transform(self, results: dict) -> Union[dict, None]:
+        """The random crop transform function.
+
+        Args:
+            results (dict): The result dict.
+
+        Returns:
+            dict: The result dict.
+        """
+
+        orig_img_h, orig_img_w = results['img'].shape[:2]
+        gt_bboxes = results['gt_bboxes']
+
+        thresholds = list(self.thresholds)
+        random.shuffle(thresholds)
+
+        for thresh in thresholds:
+
+            found = False
+            for i in range(self.num_attempts):
+                crop_h, crop_w = self._get_crop_size((orig_img_h, orig_img_w))
+                if self.aspect_ratio is None:
+                    if crop_h / crop_w < 0.5 or crop_h / crop_w > 2.0:
+                        continue
+
+                # get image crop_box
+                margin_h = max(orig_img_h - crop_h, 0)
+                margin_w = max(orig_img_w - crop_w, 0)
+                offset_h, offset_w = self._rand_offset((margin_h, margin_w))
+                crop_y1, crop_y2 = offset_h, offset_h + crop_h
+                crop_x1, crop_x2 = offset_w, offset_w + crop_w
+
+                crop_box = [crop_x1, crop_y1, crop_x2, crop_y2]
+                # Calculate the iou between gt_bboxes and crop_boxes
+                iou = self._iou_matrix(gt_bboxes,
+                                       np.array([crop_box], dtype=np.float32))
+                # If the maximum value of the iou is less than thresh,
+                # the current crop_box is considered invalid.
+                if iou.max() < thresh:
+                    continue
+
+                # If cover_all_box == True and the minimum value of
+                # the iou is less than thresh, the current crop_box
+                # is considered invalid.
+                if self.cover_all_box and iou.min() < thresh:
+                    continue
+
+                # Get which gt_bboxes to keep after cropping.
+                valid_inds = self._get_valid_inds(
+                    gt_bboxes, np.array(crop_box, dtype=np.float32))
+                if valid_inds.size > 0:
+                    found = True
+                    break
+
+            if found:
+                results = self._crop_data(results, crop_box, valid_inds)
+                return results
+        crop_box = [0, 0, self.crop_size, self.crop_size]
+        valid_inds = self._get_valid_inds(gt_bboxes,
+                                          np.array(crop_box, dtype=np.float32))
+        results = self._crop_data(results, crop_box, valid_inds)
+        return results
+
 
 @TRANSFORMS.register_module()
 class YOLOv5CopyPaste(BaseTransform):
