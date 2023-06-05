@@ -1544,6 +1544,18 @@ class PPYOLOERandomCrop(BaseTransform):
 
 
 @TRANSFORMS.register_module()
+class RandomCropIJCAI(PPYOLOERandomCrop):
+
+    def __init__(self, crop_size: int = 1600, *args, **kwargs):
+        self.crop_size = crop_size
+        super().__init__(*args, **kwargs)
+
+    @cache_randomness
+    def _get_crop_size(self, image_size: Tuple[int, int]) -> Tuple[int, int]:
+        return self.crop_size, self.crop_size
+
+
+@TRANSFORMS.register_module()
 class YOLOv5CopyPaste(BaseTransform):
     """Copy-Paste used in YOLOv5 and YOLOv8.
 
