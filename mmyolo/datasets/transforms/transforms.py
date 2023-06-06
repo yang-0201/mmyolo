@@ -2346,6 +2346,7 @@ class CopyCropIJCAI(BaseTransform):
         self.diversity = diversity
         self.max_num_cache = max_num_cache
         self.cache_images_labels = []
+        # self.cnt = 0
 
     def transform(self, results: dict) -> dict:
         num_gt = results['gt_bboxes_labels'].size
@@ -2371,7 +2372,10 @@ class CopyCropIJCAI(BaseTransform):
         _copy_num = random.randint(0, self.diversity - num_gt)
 
         random.shuffle(self.cache_images_labels)
+        # image_show = results['img'].copy()
+        # Flag = False
         while _copy_num > 0:
+            # Flag = True
             if not len(self.cache_images_labels):
                 break
             crop_image, label = self.cache_images_labels.pop()
@@ -2385,11 +2389,14 @@ class CopyCropIJCAI(BaseTransform):
             _mask = mask[top:top + h, left:left + w]
             final_mask = ~_mask & crop_mask
             ratio = final_mask.sum() / (crop_mask.sum() + 1e-7)
-            ratio = np.clip(ratio, a_min=0.1, a_max=0.8)
-            cv2.addWeighted(crop_image, ratio, results['img'][top:top + h,
-                                                              left:left + w],
-                            1 - ratio, 0, results['img'][top:top + h,
-                                                         left:left + w])
+            ratio = np.clip(ratio, a_min=0.3, a_max=0.7)
+            cv2.addWeighted(crop_image, 1 - ratio,
+                            results['img'][top:top + h, left:left + w], ratio,
+                            0, results['img'][top:top + h, left:left + w])
+            # cv2.addWeighted(image_show[top:top + h, left:left + w],
+            #                 1 - ratio, crop_image, ratio, 0,
+            #                 image_show[top:top + h, left:left + w])
+            # cv2.rectangle(image_show, (left, top), (left + w, top + h), (0, 255, 0), 2)
             mask[top:top + h, left:left + w] = True
             _add_bboxes.append([left, top, left + w, top + h])
             _add_labels.append(label)
@@ -2405,6 +2412,10 @@ class CopyCropIJCAI(BaseTransform):
                 results['gt_ignore_flags'],
                 np.zeros(len(_add_labels), dtype=bool)
             ])
+        # if Flag:
+        #     cv2.imwrite(f'save/{self.cnt:08d}.jpg', image_show)
+        #     self.cnt += 1
+        # cv2.waitKey(0)
         if len(self.cache_images_labels) > self.max_num_cache:
             self.cache_images_labels = self.cache_images_labels[:self.
                                                                 max_num_cache]
