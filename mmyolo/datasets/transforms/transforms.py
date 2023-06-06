@@ -19,6 +19,7 @@ from mmdet.structures.bbox import (HorizontalBoxes, autocast_box_type,
                                    get_box_type)
 from mmdet.structures.mask import PolygonMasks, polygon_to_bitmap
 from numpy import random
+from PIL import Image
 
 from mmyolo.registry import TRANSFORMS
 from .keypoint_structure import Keypoints
@@ -2175,4 +2176,103 @@ class Resize(MMDET_Resize):
         self._resize_masks(results)
         self._resize_seg(results)
         self._record_homography_matrix(results)
+        return results
+
+
+@TRANSFORMS.register_module()
+class CopyCropIJCAI(BaseTransform):
+
+    def __init__(self,
+                 rare_ids: Union[int, Tuple, List],
+                 diversity: int = 10,
+                 max_num_cache: int = 30) -> None:
+        assert max_num_cache >= 3 * diversity
+        if isinstance(rare_ids, int):
+            rare_ids = [rare_ids]
+        self.rare_ids = rare_ids
+        self.diversity = diversity
+        self.max_num_cache = max_num_cache
+        self.cache_images_labels = []
+        self.have_full = False
+
+    def transform(self, results: dict) -> dict:
+        num_gt = results['gt_bboxes_labels'].size
+        if num_gt == 0:
+            return results
+
+        if len(self.cache_images_labels
+               ) >= self.max_num_cache and num_gt > self.diversity:
+            return results
+
+        width = results['width']
+        height = results['height']
+        mask = np.zeros((height, width), dtype=bool)
+
+        for bbox, label in zip(results['gt_bboxes'],
+                               results['gt_bboxes_labels']):
+            bbox = bbox.tensor[0].round()
+            bbox[0::2].clamp_(0, width - 1)
+            bbox[1::2].clamp_(0, height - 1)
+            x1, y1, x2, y2 = bbox.int().tolist()
+            mask[y1:y2, x1:x2] = True
+            if label in self.rare_ids:
+                self.cache_images_labels.append((results['img'][y1:y2,
+                                                                x1:x2], label))
+
+        if results['gt_bboxes_labels'].size >= self.diversity:
+            return results
+
+        if not self.have_full and len(
+                self.cache_images_labels) > self.max_num_cache:
+            self.have_full = True
+
+        if not self.have_full:
+            return results
+
+        _copy_num = random.randint(
+            0, self.diversity - results['gt_bboxes_labels'].size)
+        if _copy_num > len(self.cache_images_labels):
+            _copy_num = len(self.cache_images_labels)
+
+        if _copy_num == 0:
+            return results
+        else:
+            _add_bboxes = []
+            _add_labels = []
+            random.shuffle(self.cache_images_labels)
+            while _copy_num > 0:
+                crop_image, label = self.cache_images_labels.pop()
+                h, w = crop_image.shape[:2]
+                crop_mask = np.ones((h, w), dtype=bool)
+                dh, dw = height - h, width - w
+                if dh < 1 or dw < 1:
+                    continue
+                left = random.randint(0, dw)
+                top = random.randint(0, dh)
+                _mask = mask[top:top + h, left:left + w]
+                final_mask = ~_mask & crop_mask
+                ratio = final_mask.sum() / (crop_mask.sum() + 1e-7)
+                ratio = np.clip(ratio, a_min=0.1, a_max=0.8)
+                cv2.addWeighted(crop_image, ratio,
+                                results['img'][top:top + h, left:left + w],
+                                1 - ratio, 0, results['img'][top:top + h,
+                                                             left:left + w])
+                mask[top:top + h, left:left + w] = True
+                _add_bboxes.append([left, top, left + w, top + h])
+                _add_labels.append(label)
+                _copy_num -= 1
+
+            results['gt_bboxes'].tensor = torch.cat(
+                [results['gt_bboxes'].tensor,
+                 torch.tensor(_add_bboxes)], 0)
+            results['gt_bboxes_labels'] = np.concatenate(
+                [results['gt_bboxes_labels'],
+                 np.array(_add_labels)])
+            results['gt_ignore_flags'] = np.concatenate([
+                results['gt_ignore_flags'],
+                np.zeros(len(_add_labels), dtype=bool)
+            ])
+        if len(self.cache_images_labels) > self.max_num_cache:
+            self.cache_images_labels = self.cache_images_labels[:self.
+                                                                max_num_cache]
         return results
