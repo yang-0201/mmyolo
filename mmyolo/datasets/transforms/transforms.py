@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import copy
 import math
 from copy import deepcopy
 from typing import List, Sequence, Tuple, Union
@@ -1776,6 +1777,159 @@ class YOLOv5CopyPaste(BaseTransform):
         repr_str += f'(ioa_thresh={self.ioa_thresh},'
         repr_str += f'prob={self.prob})'
         return repr_str
+
+
+@TRANSFORMS.register_module()
+class CopyPasteIJCAI(BaseTransform):
+
+    def __init__(self, cache_num=100):
+        self.cache_num = cache_num
+        self.cache_list = []
+
+    def transform(self, results: dict) -> dict:
+        # print('runcopypaste')
+
+        # 在未达到一定数量之前不进行增强
+        if len(self.cache_list) < self.cache_num:
+            self.cache_list.append(copy.deepcopy(results))
+            return results
+
+        # 先随机删除一个
+        rm_index = random.randint(0, len(self.cache_list) - 1)
+        self.cache_list.pop(rm_index)
+        # 再把当前的数据添加进队列
+        self.cache_list.append(copy.deepcopy(results))
+
+        # 随机选择一张图准备贴图
+        index = random.randint(0, len(self.cache_list) - 1)
+        mix_results = copy.deepcopy(self.cache_list[index])
+
+        # gt
+        img = results['img']
+        gt_bboxes = results['gt_bboxes']
+        gt_bboxes_labels = results.get('gt_bboxes_labels', None)
+        gt_ignore_flags = results['gt_ignore_flags']
+
+        # mix gt
+        mix_img = mix_results['img']
+        mix_gt_bboxes = mix_results['gt_bboxes']
+        mix_gt_bboxes_labels = mix_results.get('gt_bboxes_labels', None)
+        mix_gt_ignore_flags = mix_results['gt_ignore_flags']
+
+        # 翻转一下图(水平、垂直）
+        if random.random() < 0.5:
+            mix_img = mix_img[:, ::-1]
+            mix_gt_bboxes.flip_(mix_img.shape)
+
+        if random.random() < 0.5:
+            mix_img = mix_img[::-1]
+            mix_gt_bboxes.flip_(mix_img.shape, direction='vertical')
+
+        # 表示先选择2个box，来与其他box看有没有相交
+        # 这里计算出哪些box要copy
+        copy_num = min(2, len(mix_gt_bboxes))
+        indexes = random.choice(np.arange(len(mix_gt_bboxes)), copy_num)
+        valid_ind = np.zeros((len(mix_gt_bboxes), ), dtype=bool)
+        valid_ind[indexes] = True
+
+        while True:
+            count = (valid_ind > 0).sum()
+            iou = mix_gt_bboxes.overlaps(mix_gt_bboxes[valid_ind],
+                                         mix_gt_bboxes).sum(0)
+            # iou = self._iou_matrix(mix_gt_bboxes[valid_ind], mix_gt_bboxes).sum(0)
+            # iou大于0的也要设置为valid
+            valid_ind[iou > 0] = True
+            if count == (valid_ind > 0).sum():
+                break
+
+        valid_ind = valid_ind.nonzero()[0]
+
+        # 进行图像copy
+        mask = np.zeros_like(mix_img)
+        mix_gt_bboxes = mix_gt_bboxes[valid_ind]
+        mix_gt_bboxes_labels = mix_gt_bboxes_labels[valid_ind]
+        bbox = mix_gt_bboxes.tensor
+        for i in range(len(bbox)):
+            x1, y1, x2, y2 = bbox[i]
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+            mask[y1:y2, x1:x2] = 1
+
+        ratio = np.random.beta(32., 32.)
+        img, mix_img = img.astype(float), mix_img.astype(float)
+        img[mask > 0] = (img[mask > 0] * ratio + mix_img[mask > 0] *
+                         (1 - ratio)).astype(np.uint8)
+
+        # 合并结果
+        results['img'] = img
+        # print('!!!', mix_gt_bboxes, type(mix_gt_bboxes))
+        # print('@@@', gt_bboxes, type(gt_bboxes))
+        gt_bboxes_new = gt_bboxes.cat([gt_bboxes, mix_gt_bboxes])
+        results['gt_bboxes'] = gt_bboxes_new
+        gt_bboxes_labels_new = np.concatenate(
+            (gt_bboxes_labels, mix_gt_bboxes_labels), axis=0)
+        results['gt_bboxes_labels'] = gt_bboxes_labels_new
+        gt_ignore_flags = np.concatenate(
+            [gt_ignore_flags, mix_gt_bboxes_labels], axis=0)
+        results['gt_ignore_flags'] = gt_ignore_flags
+
+        # import cv2
+        # for label,label1 in zip(gt_bboxes, gt_bboxes_labels):
+        #     x_min = int(label.tensor.numpy()[0][0])
+        #     y_min = int(label.tensor.numpy()[0][1])
+        #     x_max = int(label.tensor.numpy()[0][2])
+        #     y_max = int(label.tensor.numpy()[0][3])
+        #     name = int(label1)
+        #     classesname = ['battery', 'pressure', 'umbrella', 'OCbottle', 'glassbottle', 'lighter',
+        #                    'electronicequipment', 'knife', 'metalbottle']
+        #     cv2.rectangle(img, (x_min, y_min), (x_max, y_max), (0, 0, 0), 2)
+        #     cv2.putText(img, str(classesname[name]), (x_min, y_min), cv2.FONT_HERSHEY_SIMPLEX , 1, (0, 0, 0),2)
+        #
+        # for label,label1 in zip(mix_gt_bboxes, mix_gt_bboxes_labels):
+        #     x_min = int(label.tensor.numpy()[0][0])
+        #     y_min = int(label.tensor.numpy()[0][1])
+        #     x_max = int(label.tensor.numpy()[0][2])
+        #     y_max = int(label.tensor.numpy()[0][3])
+        #     name = int(label1)
+        #     classesname = ['battery', 'pressure', 'umbrella', 'OCbottle', 'glassbottle', 'lighter',
+        #                    'electronicequipment', 'knife', 'metalbottle']
+        #     cv2.rectangle(img, (x_min, y_min), (x_max, y_max), (0, 0, 0), 2)
+        #     cv2.putText(img, str(classesname[name]), (x_min, y_min), cv2.FONT_HERSHEY_SIMPLEX , 1, (0, 0, 200),2)
+
+        # cv2.namedWindow("Demo", cv2.WINDOW_NORMAL)
+        # cv2.resizeWindow("Demo", 1280, 1280)
+        # cv2.imshow("Demo", img)
+        # cv2.waitKey(0)  # 等待用户按键触发
+        # cv2.imwrite("1.png", img)
+        # raise NotImplementedError
+
+        return results
+
+    def _iou_matrix(self,
+                    gt_bbox: HorizontalBoxes,
+                    crop_bbox: HorizontalBoxes,
+                    eps: float = 1e-10) -> np.ndarray:
+        """Calculate iou between gt and image crop box.
+
+        Args:
+            gt_bbox (HorizontalBoxes): Ground truth bounding boxes.
+            crop_bbox (np.ndarray): Image crop coordinates in
+                [x1, y1, x2, y2] format.
+            eps (float): Default to 1e-10.
+        Return:
+            (np.ndarray): IoU.
+        """
+        gt_bbox = gt_bbox.tensor.numpy()
+        crop_bbox = crop_bbox.tensor.numpy()
+        lefttop = np.maximum(gt_bbox[:, np.newaxis, :2], crop_bbox[:, :2])
+        rightbottom = np.minimum(gt_bbox[:, np.newaxis, 2:], crop_bbox[:, 2:])
+
+        overlap = np.prod(
+            rightbottom - lefttop,
+            axis=2) * (lefttop < rightbottom).all(axis=2)
+        area_gt_bbox = np.prod(gt_bbox[:, 2:] - crop_bbox[:, :2], axis=1)
+        area_crop_bbox = np.prod(gt_bbox[:, 2:] - crop_bbox[:, :2], axis=1)
+        area_o = (area_gt_bbox[:, np.newaxis] + area_crop_bbox - overlap)
+        return overlap / (area_o + eps)
 
 
 @TRANSFORMS.register_module()
