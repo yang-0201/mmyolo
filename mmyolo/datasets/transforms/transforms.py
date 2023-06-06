@@ -1781,17 +1781,27 @@ class YOLOv5CopyPaste(BaseTransform):
 
 @TRANSFORMS.register_module()
 class CopyPasteIJCAI(BaseTransform):
-
     def __init__(self, cache_num=100):
         self.cache_num = cache_num
         self.cache_list = []
 
-    def transform(self, results: dict) -> dict:
+    def transform(self,
+                  results: dict) -> dict:
+
         # print('runcopypaste')
+        if 'dataset' in results:
+            dataset = results['dataset']
+            results.pop('dataset')
+            flag = True
+        else:
+            dataset = None
+            flag = False
 
         # 在未达到一定数量之前不进行增强
         if len(self.cache_list) < self.cache_num:
-            self.cache_list.append(copy.deepcopy(results))
+            res = copy.deepcopy(results)
+            self.cache_list.append(res)
+            results['dataset'] = dataset
             return results
 
         # 先随机删除一个
@@ -1829,18 +1839,28 @@ class CopyPasteIJCAI(BaseTransform):
         # 这里计算出哪些box要copy
         copy_num = min(2, len(mix_gt_bboxes))
         indexes = random.choice(np.arange(len(mix_gt_bboxes)), copy_num)
-        valid_ind = np.zeros((len(mix_gt_bboxes), ), dtype=bool)
+        valid_ind = np.zeros((len(mix_gt_bboxes),), dtype=bool)
         valid_ind[indexes] = True
 
-        while True:
-            count = (valid_ind > 0).sum()
-            iou = mix_gt_bboxes.overlaps(mix_gt_bboxes[valid_ind],
-                                         mix_gt_bboxes).sum(0)
-            # iou = self._iou_matrix(mix_gt_bboxes[valid_ind], mix_gt_bboxes).sum(0)
-            # iou大于0的也要设置为valid
-            valid_ind[iou > 0] = True
-            if count == (valid_ind > 0).sum():
-                break
+        if len(valid_ind) > 1:
+            temp = 0
+            while True:
+                temp+=1
+                # print(temp)
+                # print('000')
+                count = (valid_ind > 0).sum()
+                # print('111')
+                iou = mix_gt_bboxes.overlaps(mix_gt_bboxes[valid_ind], mix_gt_bboxes).sum(0)
+                # print('222')
+                # print(valid_ind, iou)
+                # print(valid_ind.shape, iou.shape)
+                # iou = self._iou_matrix(mix_gt_bboxes[valid_ind], mix_gt_bboxes).sum(0)
+                # iou大于0的也要设置为valid
+                valid_ind[iou > 0] = True
+                # print(333)
+                if count == (valid_ind > 0).sum():
+                    # print(444)
+                    break
 
         valid_ind = valid_ind.nonzero()[0]
 
@@ -1856,8 +1876,7 @@ class CopyPasteIJCAI(BaseTransform):
 
         ratio = np.random.beta(32., 32.)
         img, mix_img = img.astype(float), mix_img.astype(float)
-        img[mask > 0] = (img[mask > 0] * ratio + mix_img[mask > 0] *
-                         (1 - ratio)).astype(np.uint8)
+        img[mask>0] = (img[mask>0]*ratio + mix_img[mask>0]*(1-ratio)).astype(np.uint8)
 
         # 合并结果
         results['img'] = img
@@ -1865,12 +1884,13 @@ class CopyPasteIJCAI(BaseTransform):
         # print('@@@', gt_bboxes, type(gt_bboxes))
         gt_bboxes_new = gt_bboxes.cat([gt_bboxes, mix_gt_bboxes])
         results['gt_bboxes'] = gt_bboxes_new
-        gt_bboxes_labels_new = np.concatenate(
-            (gt_bboxes_labels, mix_gt_bboxes_labels), axis=0)
+        gt_bboxes_labels_new = np.concatenate((gt_bboxes_labels, mix_gt_bboxes_labels), axis=0)
         results['gt_bboxes_labels'] = gt_bboxes_labels_new
         gt_ignore_flags = np.concatenate(
-            [gt_ignore_flags, mix_gt_bboxes_labels], axis=0)
+            [gt_ignore_flags, mix_gt_ignore_flags[valid_ind]], axis=0)
         results['gt_ignore_flags'] = gt_ignore_flags
+
+        assert len(gt_bboxes_new) == len(gt_bboxes_labels_new) == len(gt_ignore_flags)
 
         # import cv2
         # for label,label1 in zip(gt_bboxes, gt_bboxes_labels):
@@ -1901,8 +1921,10 @@ class CopyPasteIJCAI(BaseTransform):
         # cv2.waitKey(0)  # 等待用户按键触发
         # cv2.imwrite("1.png", img)
         # raise NotImplementedError
-
+        if flag:
+            results['dataset'] = dataset
         return results
+
 
     def _iou_matrix(self,
                     gt_bbox: HorizontalBoxes,
