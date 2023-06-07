@@ -20,6 +20,7 @@ from mmdet.structures.bbox import (HorizontalBoxes, autocast_box_type,
                                    get_box_type)
 from mmdet.structures.mask import PolygonMasks, polygon_to_bitmap
 from numpy import random
+from PIL import Image  # noqa: F401
 
 from mmyolo.registry import TRANSFORMS
 from .keypoint_structure import Keypoints
@@ -1561,7 +1562,6 @@ class RandomCropIJCAI(PPYOLOERandomCrop):
 
         Args:
             results (dict): The result dict.
-
         Returns:
             dict: The result dict.
         """
@@ -1777,181 +1777,6 @@ class YOLOv5CopyPaste(BaseTransform):
         repr_str += f'(ioa_thresh={self.ioa_thresh},'
         repr_str += f'prob={self.prob})'
         return repr_str
-
-
-@TRANSFORMS.register_module()
-class CopyPasteIJCAI(BaseTransform):
-    def __init__(self, cache_num=100):
-        self.cache_num = cache_num
-        self.cache_list = []
-
-    def transform(self,
-                  results: dict) -> dict:
-
-        # print('runcopypaste')
-        if 'dataset' in results:
-            dataset = results['dataset']
-            results.pop('dataset')
-            flag = True
-        else:
-            dataset = None
-            flag = False
-
-        # 在未达到一定数量之前不进行增强
-        if len(self.cache_list) < self.cache_num:
-            res = copy.deepcopy(results)
-            self.cache_list.append(res)
-            results['dataset'] = dataset
-            return results
-
-        # 先随机删除一个
-        rm_index = random.randint(0, len(self.cache_list) - 1)
-        self.cache_list.pop(rm_index)
-        # 再把当前的数据添加进队列
-        self.cache_list.append(copy.deepcopy(results))
-
-        # 随机选择一张图准备贴图
-        index = random.randint(0, len(self.cache_list) - 1)
-        mix_results = copy.deepcopy(self.cache_list[index])
-
-        # gt
-        img = results['img']
-        gt_bboxes = results['gt_bboxes']
-        gt_bboxes_labels = results.get('gt_bboxes_labels', None)
-        gt_ignore_flags = results['gt_ignore_flags']
-
-        # mix gt
-        mix_img = mix_results['img']
-        mix_gt_bboxes = mix_results['gt_bboxes']
-        mix_gt_bboxes_labels = mix_results.get('gt_bboxes_labels', None)
-        mix_gt_ignore_flags = mix_results['gt_ignore_flags']
-
-        # 翻转一下图(水平、垂直）
-        if random.random() < 0.5:
-            mix_img = mix_img[:, ::-1]
-            mix_gt_bboxes.flip_(mix_img.shape)
-
-        if random.random() < 0.5:
-            mix_img = mix_img[::-1]
-            mix_gt_bboxes.flip_(mix_img.shape, direction='vertical')
-
-        # 表示先选择2个box，来与其他box看有没有相交
-        # 这里计算出哪些box要copy
-        copy_num = min(2, len(mix_gt_bboxes))
-        indexes = random.choice(np.arange(len(mix_gt_bboxes)), copy_num)
-        valid_ind = np.zeros((len(mix_gt_bboxes),), dtype=bool)
-        valid_ind[indexes] = True
-
-        if len(valid_ind) > 1:
-            temp = 0
-            while True:
-                temp+=1
-                # print(temp)
-                # print('000')
-                count = (valid_ind > 0).sum()
-                # print('111')
-                iou = mix_gt_bboxes.overlaps(mix_gt_bboxes[valid_ind], mix_gt_bboxes).sum(0)
-                # print('222')
-                # print(valid_ind, iou)
-                # print(valid_ind.shape, iou.shape)
-                # iou = self._iou_matrix(mix_gt_bboxes[valid_ind], mix_gt_bboxes).sum(0)
-                # iou大于0的也要设置为valid
-                valid_ind[iou > 0] = True
-                # print(333)
-                if count == (valid_ind > 0).sum():
-                    # print(444)
-                    break
-
-        valid_ind = valid_ind.nonzero()[0]
-
-        # 进行图像copy
-        mask = np.zeros_like(mix_img)
-        mix_gt_bboxes = mix_gt_bboxes[valid_ind]
-        mix_gt_bboxes_labels = mix_gt_bboxes_labels[valid_ind]
-        bbox = mix_gt_bboxes.tensor
-        for i in range(len(bbox)):
-            x1, y1, x2, y2 = bbox[i]
-            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-            mask[y1:y2, x1:x2] = 1
-
-        ratio = np.random.beta(32., 32.)
-        img, mix_img = img.astype(float), mix_img.astype(float)
-        img[mask>0] = (img[mask>0]*ratio + mix_img[mask>0]*(1-ratio)).astype(np.uint8)
-
-        # 合并结果
-        results['img'] = img
-        # print('!!!', mix_gt_bboxes, type(mix_gt_bboxes))
-        # print('@@@', gt_bboxes, type(gt_bboxes))
-        gt_bboxes_new = gt_bboxes.cat([gt_bboxes, mix_gt_bboxes])
-        results['gt_bboxes'] = gt_bboxes_new
-        gt_bboxes_labels_new = np.concatenate((gt_bboxes_labels, mix_gt_bboxes_labels), axis=0)
-        results['gt_bboxes_labels'] = gt_bboxes_labels_new
-        gt_ignore_flags = np.concatenate(
-            [gt_ignore_flags, mix_gt_ignore_flags[valid_ind]], axis=0)
-        results['gt_ignore_flags'] = gt_ignore_flags
-
-        assert len(gt_bboxes_new) == len(gt_bboxes_labels_new) == len(gt_ignore_flags)
-
-        # import cv2
-        # for label,label1 in zip(gt_bboxes, gt_bboxes_labels):
-        #     x_min = int(label.tensor.numpy()[0][0])
-        #     y_min = int(label.tensor.numpy()[0][1])
-        #     x_max = int(label.tensor.numpy()[0][2])
-        #     y_max = int(label.tensor.numpy()[0][3])
-        #     name = int(label1)
-        #     classesname = ['battery', 'pressure', 'umbrella', 'OCbottle', 'glassbottle', 'lighter',
-        #                    'electronicequipment', 'knife', 'metalbottle']
-        #     cv2.rectangle(img, (x_min, y_min), (x_max, y_max), (0, 0, 0), 2)
-        #     cv2.putText(img, str(classesname[name]), (x_min, y_min), cv2.FONT_HERSHEY_SIMPLEX , 1, (0, 0, 0),2)
-        #
-        # for label,label1 in zip(mix_gt_bboxes, mix_gt_bboxes_labels):
-        #     x_min = int(label.tensor.numpy()[0][0])
-        #     y_min = int(label.tensor.numpy()[0][1])
-        #     x_max = int(label.tensor.numpy()[0][2])
-        #     y_max = int(label.tensor.numpy()[0][3])
-        #     name = int(label1)
-        #     classesname = ['battery', 'pressure', 'umbrella', 'OCbottle', 'glassbottle', 'lighter',
-        #                    'electronicequipment', 'knife', 'metalbottle']
-        #     cv2.rectangle(img, (x_min, y_min), (x_max, y_max), (0, 0, 0), 2)
-        #     cv2.putText(img, str(classesname[name]), (x_min, y_min), cv2.FONT_HERSHEY_SIMPLEX , 1, (0, 0, 200),2)
-
-        # cv2.namedWindow("Demo", cv2.WINDOW_NORMAL)
-        # cv2.resizeWindow("Demo", 1280, 1280)
-        # cv2.imshow("Demo", img)
-        # cv2.waitKey(0)  # 等待用户按键触发
-        # cv2.imwrite("1.png", img)
-        # raise NotImplementedError
-        if flag:
-            results['dataset'] = dataset
-        return results
-
-
-    def _iou_matrix(self,
-                    gt_bbox: HorizontalBoxes,
-                    crop_bbox: HorizontalBoxes,
-                    eps: float = 1e-10) -> np.ndarray:
-        """Calculate iou between gt and image crop box.
-
-        Args:
-            gt_bbox (HorizontalBoxes): Ground truth bounding boxes.
-            crop_bbox (np.ndarray): Image crop coordinates in
-                [x1, y1, x2, y2] format.
-            eps (float): Default to 1e-10.
-        Return:
-            (np.ndarray): IoU.
-        """
-        gt_bbox = gt_bbox.tensor.numpy()
-        crop_bbox = crop_bbox.tensor.numpy()
-        lefttop = np.maximum(gt_bbox[:, np.newaxis, :2], crop_bbox[:, :2])
-        rightbottom = np.minimum(gt_bbox[:, np.newaxis, 2:], crop_bbox[:, 2:])
-
-        overlap = np.prod(
-            rightbottom - lefttop,
-            axis=2) * (lefttop < rightbottom).all(axis=2)
-        area_gt_bbox = np.prod(gt_bbox[:, 2:] - crop_bbox[:, :2], axis=1)
-        area_crop_bbox = np.prod(gt_bbox[:, 2:] - crop_bbox[:, :2], axis=1)
-        area_o = (area_gt_bbox[:, np.newaxis] + area_crop_bbox - overlap)
-        return overlap / (area_o + eps)
 
 
 @TRANSFORMS.register_module()
@@ -2352,4 +2177,272 @@ class Resize(MMDET_Resize):
         self._resize_masks(results)
         self._resize_seg(results)
         self._record_homography_matrix(results)
+        return results
+
+
+@TRANSFORMS.register_module()
+class CopyPasteIJCAI(BaseTransform):
+
+    def __init__(self, cache_num=100):
+        self.cache_num = cache_num
+        self.cache_list = []
+
+    def transform(self, results: dict) -> dict:
+
+        # print('runcopypaste')
+        if 'dataset' in results:
+            dataset = results['dataset']
+            results.pop('dataset')
+            flag = True
+        else:
+            dataset = None
+            flag = False
+
+        # 在未达到一定数量之前不进行增强
+        if len(self.cache_list) < self.cache_num:
+            res = copy.deepcopy(results)
+            self.cache_list.append(res)
+            results['dataset'] = dataset
+            return results
+
+        # 先随机删除一个
+        rm_index = random.randint(0, len(self.cache_list) - 1)
+        self.cache_list.pop(rm_index)
+        # 再把当前的数据添加进队列
+        self.cache_list.append(copy.deepcopy(results))
+
+        # 随机选择一张图准备贴图
+        index = random.randint(0, len(self.cache_list) - 1)
+        mix_results = copy.deepcopy(self.cache_list[index])
+
+        # gt
+        img = results['img']
+        gt_bboxes = results['gt_bboxes']
+        gt_bboxes_labels = results.get('gt_bboxes_labels', None)
+        gt_ignore_flags = results['gt_ignore_flags']
+
+        # mix gt
+        mix_img = mix_results['img']
+        mix_gt_bboxes = mix_results['gt_bboxes']
+        mix_gt_bboxes_labels = mix_results.get('gt_bboxes_labels', None)
+        mix_gt_ignore_flags = mix_results['gt_ignore_flags']
+
+        # 翻转一下图(水平、垂直）
+        if random.random() < 0.5:
+            mix_img = mix_img[:, ::-1]
+            mix_gt_bboxes.flip_(mix_img.shape)
+
+        if random.random() < 0.5:
+            mix_img = mix_img[::-1]
+            mix_gt_bboxes.flip_(mix_img.shape, direction='vertical')
+
+        # 表示先选择2个box，来与其他box看有没有相交
+        # 这里计算出哪些box要copy
+        copy_num = min(2, len(mix_gt_bboxes))
+        indexes = random.choice(np.arange(len(mix_gt_bboxes)), copy_num)
+        valid_ind = np.zeros((len(mix_gt_bboxes), ), dtype=bool)
+        valid_ind[indexes] = True
+
+        if len(valid_ind) > 1:
+            temp = 0
+            while True:
+                temp += 1
+                # print(temp)
+                # print('000')
+                count = (valid_ind > 0).sum()
+                # print('111')
+                iou = mix_gt_bboxes.overlaps(mix_gt_bboxes[valid_ind],
+                                             mix_gt_bboxes).sum(0)
+                # print('222')
+                # print(valid_ind, iou)
+                # print(valid_ind.shape, iou.shape)
+                # iou = self._iou_matrix(mix_gt_bboxes[valid_ind], mix_gt_bboxes).sum(0)
+                # iou大于0的也要设置为valid
+                valid_ind[iou > 0] = True
+                # print(333)
+                if count == (valid_ind > 0).sum():
+                    # print(444)
+                    break
+
+        valid_ind = valid_ind.nonzero()[0]
+
+        # 进行图像copy
+        mask = np.zeros_like(mix_img)
+        mix_gt_bboxes = mix_gt_bboxes[valid_ind]
+        mix_gt_bboxes_labels = mix_gt_bboxes_labels[valid_ind]
+        bbox = mix_gt_bboxes.tensor
+        for i in range(len(bbox)):
+            x1, y1, x2, y2 = bbox[i]
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+            mask[y1:y2, x1:x2] = 1
+
+        ratio = np.random.beta(32., 32.)
+        img, mix_img = img.astype(float), mix_img.astype(float)
+        img[mask > 0] = (img[mask > 0] * ratio + mix_img[mask > 0] *
+                         (1 - ratio)).astype(np.uint8)
+
+        # 合并结果
+        results['img'] = img
+        # print('!!!', mix_gt_bboxes, type(mix_gt_bboxes))
+        # print('@@@', gt_bboxes, type(gt_bboxes))
+        gt_bboxes_new = gt_bboxes.cat([gt_bboxes, mix_gt_bboxes])
+        results['gt_bboxes'] = gt_bboxes_new
+        gt_bboxes_labels_new = np.concatenate(
+            (gt_bboxes_labels, mix_gt_bboxes_labels), axis=0)
+        results['gt_bboxes_labels'] = gt_bboxes_labels_new
+        gt_ignore_flags = np.concatenate(
+            [gt_ignore_flags, mix_gt_ignore_flags[valid_ind]], axis=0)
+        results['gt_ignore_flags'] = gt_ignore_flags
+
+        assert len(gt_bboxes_new) == len(gt_bboxes_labels_new) == len(
+            gt_ignore_flags)
+
+        # import cv2
+        # for label,label1 in zip(gt_bboxes, gt_bboxes_labels):
+        #     x_min = int(label.tensor.numpy()[0][0])
+        #     y_min = int(label.tensor.numpy()[0][1])
+        #     x_max = int(label.tensor.numpy()[0][2])
+        #     y_max = int(label.tensor.numpy()[0][3])
+        #     name = int(label1)
+        #     classesname = ['battery', 'pressure', 'umbrella', 'OCbottle', 'glassbottle', 'lighter',
+        #                    'electronicequipment', 'knife', 'metalbottle']
+        #     cv2.rectangle(img, (x_min, y_min), (x_max, y_max), (0, 0, 0), 2)
+        #     cv2.putText(img, str(classesname[name]), (x_min, y_min), cv2.FONT_HERSHEY_SIMPLEX , 1, (0, 0, 0),2)
+        #
+        # for label,label1 in zip(mix_gt_bboxes, mix_gt_bboxes_labels):
+        #     x_min = int(label.tensor.numpy()[0][0])
+        #     y_min = int(label.tensor.numpy()[0][1])
+        #     x_max = int(label.tensor.numpy()[0][2])
+        #     y_max = int(label.tensor.numpy()[0][3])
+        #     name = int(label1)
+        #     classesname = ['battery', 'pressure', 'umbrella', 'OCbottle', 'glassbottle', 'lighter',
+        #                    'electronicequipment', 'knife', 'metalbottle']
+        #     cv2.rectangle(img, (x_min, y_min), (x_max, y_max), (0, 0, 0), 2)
+        #     cv2.putText(img, str(classesname[name]), (x_min, y_min), cv2.FONT_HERSHEY_SIMPLEX , 1, (0, 0, 200),2)
+
+        # cv2.namedWindow("Demo", cv2.WINDOW_NORMAL)
+        # cv2.resizeWindow("Demo", 1280, 1280)
+        # cv2.imshow("Demo", img)
+        # cv2.waitKey(0)  # 等待用户按键触发
+        # cv2.imwrite("1.png", img)
+        # raise NotImplementedError
+        if flag:
+            results['dataset'] = dataset
+        return results
+
+    def _iou_matrix(self,
+                    gt_bbox: HorizontalBoxes,
+                    crop_bbox: HorizontalBoxes,
+                    eps: float = 1e-10) -> np.ndarray:
+        """Calculate iou between gt and image crop box.
+
+        Args:
+            gt_bbox (HorizontalBoxes): Ground truth bounding boxes.
+            crop_bbox (np.ndarray): Image crop coordinates in
+                [x1, y1, x2, y2] format.
+            eps (float): Default to 1e-10.
+        Return:
+            (np.ndarray): IoU.
+        """
+        gt_bbox = gt_bbox.tensor.numpy()
+        crop_bbox = crop_bbox.tensor.numpy()
+        lefttop = np.maximum(gt_bbox[:, np.newaxis, :2], crop_bbox[:, :2])
+        rightbottom = np.minimum(gt_bbox[:, np.newaxis, 2:], crop_bbox[:, 2:])
+
+        overlap = np.prod(
+            rightbottom - lefttop,
+            axis=2) * (lefttop < rightbottom).all(axis=2)
+        area_gt_bbox = np.prod(gt_bbox[:, 2:] - crop_bbox[:, :2], axis=1)
+        area_crop_bbox = np.prod(gt_bbox[:, 2:] - crop_bbox[:, :2], axis=1)
+        area_o = (area_gt_bbox[:, np.newaxis] + area_crop_bbox - overlap)
+        return overlap / (area_o + eps)
+
+
+@TRANSFORMS.register_module()
+class CopyCropIJCAI(BaseTransform):
+
+    def __init__(self,
+                 rare_ids: Union[int, Tuple, List],
+                 diversity: int = 10,
+                 max_num_cache: int = 30) -> None:
+        assert max_num_cache >= 3 * diversity
+        if isinstance(rare_ids, int):
+            rare_ids = [rare_ids]
+        self.rare_ids = rare_ids
+        self.diversity = diversity
+        self.max_num_cache = max_num_cache
+        self.cache_images_labels = []
+        # self.cnt = 0
+
+    def transform(self, results: dict) -> dict:
+        num_gt = results['gt_bboxes_labels'].size
+        width = results['width']
+        height = results['height']
+        mask = np.zeros((height, width), dtype=bool)
+        for bbox, label in zip(results['gt_bboxes'],
+                               results['gt_bboxes_labels']):
+            bbox = bbox.tensor[0].round()
+            bbox[0::2].clamp_(0, width - 1)
+            bbox[1::2].clamp_(0, height - 1)
+            x1, y1, x2, y2 = bbox.int().tolist()
+            mask[y1:y2, x1:x2] = True
+            if label in self.rare_ids:
+                data = (results['img'][y1:y2, x1:x2], label)
+                self.cache_images_labels.append(data)
+        if len(self.cache_images_labels
+               ) < self.diversity or num_gt >= self.diversity:
+            return results
+
+        _add_bboxes = []
+        _add_labels = []
+        _copy_num = random.randint(0, self.diversity - num_gt)
+
+        random.shuffle(self.cache_images_labels)
+        # image_show = results['img'].copy()
+        # Flag = False
+        while _copy_num > 0:
+            # Flag = True
+            if not len(self.cache_images_labels):
+                break
+            crop_image, label = self.cache_images_labels.pop()
+            h, w = crop_image.shape[:2]
+            crop_mask = np.ones((h, w), dtype=bool)
+            dh, dw = height - h, width - w
+            if dh < 1 or dw < 1:
+                continue
+            left = random.randint(0, dw)
+            top = random.randint(0, dh)
+            _mask = mask[top:top + h, left:left + w]
+            final_mask = ~_mask & crop_mask
+            ratio = final_mask.sum() / (crop_mask.sum() + 1e-7)
+            ratio = np.clip(ratio, a_min=0.3, a_max=0.7)
+            cv2.addWeighted(crop_image, 1 - ratio,
+                            results['img'][top:top + h, left:left + w], ratio,
+                            0, results['img'][top:top + h, left:left + w])
+            # cv2.addWeighted(image_show[top:top + h, left:left + w],
+            #                 1 - ratio, crop_image, ratio, 0,
+            #                 image_show[top:top + h, left:left + w])
+            # cv2.rectangle(image_show, (left, top), (left + w, top + h), (0, 255, 0), 2)
+            mask[top:top + h, left:left + w] = True
+            _add_bboxes.append([left, top, left + w, top + h])
+            _add_labels.append(label)
+            _copy_num -= 1
+
+            results['gt_bboxes'].tensor = torch.cat(
+                [results['gt_bboxes'].tensor,
+                 torch.tensor(_add_bboxes)], 0)
+            results['gt_bboxes_labels'] = np.concatenate(
+                [results['gt_bboxes_labels'],
+                 np.array(_add_labels)])
+            results['gt_ignore_flags'] = np.concatenate([
+                results['gt_ignore_flags'],
+                np.zeros(len(_add_labels), dtype=bool)
+            ])
+        # if Flag:
+        #     cv2.imwrite(f'save/{self.cnt:08d}.jpg', image_show)
+        #     self.cnt += 1
+        # cv2.waitKey(0)
+        if len(self.cache_images_labels) > self.max_num_cache:
+            self.cache_images_labels = self.cache_images_labels[:self.
+                                                                max_num_cache]
         return results
